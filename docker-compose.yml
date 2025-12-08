@@ -1,0 +1,159 @@
+services:
+  # --- Primary Database (PostgreSQL) ---
+  postgres:
+    image: postgres:16
+    container_name: contexus-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: contexus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contexus}
+      POSTGRES_DB: contexus
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+      - ./init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contexus -d contexus -h localhost -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+  # --- Cache & Sessions (Redis) ---
+  redis:
+    image: redis:7-alpine
+    container_name: contexus-redis
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - redis_data:/data
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  # --- IoT Hub Application ---
+  contexus:
+    image: contexusio/contexus:latest
+    container_name: contexus-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 15000
+      # Database configuration
+      DATABASE_URL: postgresql://contexus:${POSTGRES_PASSWORD:-contexus}@postgres:5432/contexus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contexus}
+      # Redis configuration
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
+      # Application security
+      SESSION_SECRET: ${SESSION_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      # Email configuration
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST:-smtp.exmail.qq.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-contact@contexus.io}
+      # Security and CORS
+      FORCE_HTTPS: ${FORCE_HTTPS:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      ALLOWED_NO_ORIGINS: ${ALLOWED_NO_ORIGINS:-true}
+      # Database connection tuning
+      PG_CONNECT_TIMEOUT: "30"
+      PG_MAX_CONNECTIONS: "25"
+      PG_IDLE_TIMEOUT: "60"
+      PG_STATEMENT_TIMEOUT: "30000"
+      PG_QUERY_TIMEOUT: "30000"
+      # Redis connection tuning
+      REDIS_CONNECT_TIMEOUT: "10000"
+      REDIS_COMMAND_TIMEOUT: "5000"
+      REDIS_RETRY_DELAY_ON_FAILURE: "100"
+      # Application performance - FIXED NODE_OPTIONS
+      NODE_OPTIONS: "--max-old-space-size=1024"
+      UV_THREADPOOL_SIZE: "16"
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "${APP_PORT:-15000}:15000"
+    networks:
+      - iot-network
+    volumes:
+      - app_logs:/app/logs
+      - app_uploads:/app/uploads
+      - app_cache:/app/.cache
+      - ./manual-schema.sql:/app/manual-schema.sql:ro
+      # Mount configuration files (optional - create if missing)
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:15000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+# --- Networks ---
+networks:
+  iot-network:
+    driver: bridge
+    name: contexus-iot-network
+    attachable: true
+
+# --- Volumes ---
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/postgres
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/redis
+  app_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/logs
+  app_uploads:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/uploads
+  app_cache:
+    driver: local
+
+# --- Extension for development ---
+x-development: &development-overrides
+  environment:
+    NODE_ENV: development
+    LOG_LEVEL: debug
+  volumes:
+    - .:/app
+    - /app/node_modules
+  command: npm run dev
+
+# --- Profiles for different deployment scenarios ---
+# Usage examples:
+# docker-compose up -d                          # Basic stack
+# docker-compose --profile development up -d    # Development mode
